@@ -24,7 +24,7 @@ use std::{
 
 use snarkvm_algorithms::{SNARKError, SNARK, SRS};
 use snarkvm_curves::bls12_377::Fr;
-use snarkvm_dpc::{testnet2::Testnet2, Network, PoSWScheme, PoswError};
+use snarkvm_dpc::{testnet2::Testnet2, Network, PoSWScheme, PoswError, BlockHeader};
 use snarkvm_utilities::ToBytes;
 
 use rand::{rngs::ThreadRng, thread_rng};
@@ -41,6 +41,24 @@ fn test_posw_load_and_mine() {
         block_header.proof().as_ref().unwrap().to_bytes_le().unwrap().len(),
         Testnet2::HEADER_PROOF_SIZE_IN_BYTES
     ); // NOTE: Marlin proofs use compressed serialization
+    assert!(Testnet2::posw().verify(&block_header));
+}
+
+#[test]
+fn test_posw_load_and_mine_stratum() {
+    // Construct a block header.
+    let block_header = Testnet2::genesis_block().header().clone();
+
+    let block_header = BlockHeader::mine_stratum(
+        block_header.height(),
+        block_header.timestamp(),
+        block_header.difficulty_target(),
+        block_header.cumulative_weight(),
+        block_header.previous_ledger_root(),
+        block_header.transactions_root(),
+        &AtomicBool::new(false), &mut thread_rng(),
+    ).unwrap();
+
     assert!(Testnet2::posw().verify(&block_header));
 }
 

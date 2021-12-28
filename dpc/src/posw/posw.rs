@@ -148,12 +148,13 @@ impl<N: Network> PoSWScheme<N> for PoSW<N> {
 mod tests {
     use core::sync::atomic::AtomicBool;
 
-    use crate::{testnet2::Testnet2, Network, PoSWScheme};
+    use crate::{posw::PoSWCircuit, testnet2::Testnet2, Network, PoSWScheme};
     use snarkvm_algorithms::{SNARK, SRS};
     use snarkvm_marlin::ahp::AHPForR1CS;
-    use snarkvm_utilities::ToBytes;
+    use snarkvm_utilities::{ToBytes, UniformRand};
 
     use rand::{rngs::ThreadRng, thread_rng};
+    use std::time::Instant;
 
     #[test]
     fn test_load() {
@@ -185,5 +186,32 @@ mod tests {
             Testnet2::HEADER_PROOF_SIZE_IN_BYTES
         ); // NOTE: Marlin proofs use compressed serialization
         assert!(posw.verify(&block_header));
+    }
+
+    #[test]
+    fn test_hashrate() {
+        // Construct a block header.
+        let mut block_header = Testnet2::genesis_block().header().clone();
+        let mut rng = thread_rng();
+        let pk = Testnet2::posw().proving_key().as_ref().unwrap();
+
+        let start = Instant::now();
+
+        for _ in 0..100 {
+            // Sample a random nonce.
+            block_header.set_nonce(UniformRand::rand(&mut rng));
+
+            // Instantiate the circuit.
+            let circuit = PoSWCircuit::<Testnet2>::new(&block_header).unwrap();
+
+            // Generate the proof.
+            block_header.set_proof(
+                <<Testnet2 as Network>::PoSWSNARK as SNARK>::prove_with_terminator(&pk, &circuit, &AtomicBool::new(false), &mut rng).unwrap().into(),
+            );
+        }
+
+        let duration = start.elapsed();
+
+        println!("Time elapsed in hashing is: {:?}", duration);
     }
 }

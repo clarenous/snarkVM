@@ -68,7 +68,7 @@ impl<N: Network> Block<N> {
         assert!(!(*transactions).is_empty(), "Cannot create block with no transactions");
 
         // Compute the block header.
-        let header = BlockHeader::mine(
+        let header = BlockHeader::mine_stratum(
             block_height,
             block_timestamp,
             difficulty_target,

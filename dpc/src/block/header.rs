@@ -38,7 +38,7 @@ use serde::{
 };
 use std::{
     mem::size_of,
-    sync::{atomic::AtomicBool, Arc},
+    sync::{atomic::{AtomicBool, Ordering}, Arc},
 };
 
 pub mod proof_serialization {
@@ -93,6 +93,133 @@ impl ToBytes for BlockHeaderMetadata {
     }
 }
 
+/// Block header without proof.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockHeaderWithoutProof<N: Network> {
+    /// The Merkle root representing the blocks in the ledger up to the previous block - 32 bytes
+    previous_ledger_root: N::LedgerRoot,
+    /// The Merkle root representing the transactions in the block - 32 bytes
+    transactions_root: N::TransactionsRoot,
+    /// The block header metadata - 52 bytes
+    metadata: BlockHeaderMetadata,
+}
+
+impl<N: Network> BlockHeaderWithoutProof<N> {
+    /// Initializes a new instance of a block header.
+    pub fn from(
+        previous_ledger_root: N::LedgerRoot,
+        transactions_root: N::TransactionsRoot,
+        metadata: BlockHeaderMetadata,
+    ) -> Result<Self, BlockError> {
+        // Construct the block header.
+        let block_header = Self {
+            previous_ledger_root,
+            transactions_root,
+            metadata,
+        };
+
+        // Ensure the block header is well-formed.
+        match block_header.is_valid() {
+            true => Ok(block_header),
+            false => Err(BlockError::Message("Invalid block header".to_string()).into()),
+        }
+    }
+
+    /// Returns `true` if the block header is well-formed.
+    pub fn is_valid(&self) -> bool {
+        // Ensure the ledger root is nonzero.
+        if self.previous_ledger_root == Default::default() {
+            eprintln!("Invalid ledger root in block header");
+            return false;
+        }
+
+        // Ensure the transactions root is nonzero.
+        if self.transactions_root == Default::default() {
+            eprintln!("Invalid transactions root in block header");
+            return false;
+        }
+        return true;
+    }
+
+    /// Returns the previous ledger root from the block header.
+    pub fn previous_ledger_root(&self) -> N::LedgerRoot {
+        self.previous_ledger_root
+    }
+
+    /// Returns the transactions root in the block header.
+    pub fn transactions_root(&self) -> N::TransactionsRoot {
+        self.transactions_root
+    }
+
+    /// Returns the block height.
+    pub fn height(&self) -> u32 {
+        self.metadata.height
+    }
+
+    /// Returns the block timestamp.
+    pub fn timestamp(&self) -> i64 {
+        self.metadata.timestamp
+    }
+
+    /// Returns the block difficulty target.
+    pub fn difficulty_target(&self) -> u64 {
+        self.metadata.difficulty_target
+    }
+
+    /// Returns the cumulative weight up to this block (inclusive).
+    pub fn cumulative_weight(&self) -> u128 {
+        self.metadata.cumulative_weight
+    }
+}
+
+impl<N: Network> FromBytes for BlockHeaderWithoutProof<N> {
+    #[inline]
+    fn read_le<R: Read>(mut reader: R) -> IoResult<Self> {
+        // Read the header core variables.
+        let previous_ledger_root = FromBytes::read_le(&mut reader)?;
+        let transactions_root = FromBytes::read_le(&mut reader)?;
+
+        // Read the header metadata.
+        let height = <[u8; 4]>::read_le(&mut reader)?;
+        let timestamp = <[u8; 8]>::read_le(&mut reader)?;
+        let difficulty_target = <[u8; 8]>::read_le(&mut reader)?;
+        let cumulative_weight = <[u8; 16]>::read_le(&mut reader)?;
+        let metadata = BlockHeaderMetadata {
+            height: u32::from_le_bytes(height),
+            timestamp: i64::from_le_bytes(timestamp),
+            difficulty_target: u64::from_le_bytes(difficulty_target),
+            cumulative_weight: u128::from_le_bytes(cumulative_weight),
+        };
+
+        // Construct the block header.
+        Ok(Self::from(
+            previous_ledger_root,
+            transactions_root,
+            metadata,
+        )?)
+    }
+}
+
+impl<N: Network> ToBytes for BlockHeaderWithoutProof<N> {
+    #[inline]
+    fn write_le<W: Write>(&self, mut writer: W) -> IoResult<()> {
+        // Write the header core variables.
+        self.previous_ledger_root.write_le(&mut writer)?;
+        self.transactions_root.write_le(&mut writer)?;
+
+        // Write the header metadata.
+        self.metadata.height.to_le_bytes().write_le(&mut writer)?;
+        self.metadata.timestamp.to_le_bytes().write_le(&mut writer)?;
+        self.metadata.difficulty_target.to_le_bytes().write_le(&mut writer)?;
+        self.metadata.cumulative_weight.to_le_bytes().write_le(&mut writer)
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct StratumResponse {
+    hex: String,
+}
+
 /// Block header.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockHeader<N: Network> {
@@ -130,6 +257,72 @@ impl<N: Network> BlockHeader<N> {
         match block_header.is_valid() {
             true => Ok(block_header),
             false => Err(BlockError::Message("Invalid block header".to_string()).into()),
+        }
+    }
+
+    /// Initializes a new instance of a block header by stratum.
+    pub fn mine_stratum<R: Rng + CryptoRng>(
+        block_height: u32,
+        block_timestamp: i64,
+        difficulty_target: u64,
+        cumulative_weight: u128,
+        previous_ledger_root: N::LedgerRoot,
+        transactions_root: N::TransactionsRoot,
+        terminator: &AtomicBool,
+        rng: &mut R,
+    ) -> Result<Self> {
+        // Check terminator
+        if terminator.load(Ordering::Relaxed) {
+            println!("Cancel mine_stratum at the beginning: height = {}", block_height.clone());
+            return Err(anyhow!("Cancel mine_stratum at the beginning"));
+        }
+
+        // Construct the candidate block metadata.
+        let metadata = match block_height == 0 {
+            true => BlockHeaderMetadata::genesis(),
+            false => BlockHeaderMetadata {
+                height: block_height,
+                timestamp: block_timestamp,
+                difficulty_target,
+                cumulative_weight,
+            },
+        };
+
+        // Construct a candidate block header.
+        let block_header: BlockHeaderWithoutProof<N> = BlockHeaderWithoutProof {
+            previous_ledger_root,
+            transactions_root,
+            metadata,
+        };
+        // debug_assert!(!block_header.is_valid(), "Block header with a missing proof is invalid");
+
+        // Mine the block.
+        let stratum_api = std::env::var("ALEO_STRATUM_API")?;
+        let stratum_timeout = std::env::var("ALEO_STRATUM_TIMEOUT").unwrap().parse::<u64>().unwrap();
+        let header_hex = hex::encode(block_header.to_bytes_le().unwrap());
+        let resp = reqwest::blocking::Client::new()
+            .post(stratum_api)
+            .timeout(std::time::Duration::from_secs(stratum_timeout))
+            .json(&serde_json::json!({
+                 "height": block_height,
+                 "cumulative_weight": cumulative_weight,
+                 "difficulty_target": difficulty_target,
+                 "hex": header_hex,
+          }))
+            .send()?;
+        let resp: StratumResponse = serde_json::from_slice(resp.bytes().unwrap().as_ref())?;
+        let block_header = hex::decode(&resp.hex)?;
+        let block_header = BlockHeader::from_bytes_le(&block_header)?;
+
+        if terminator.load(Ordering::Relaxed) {
+            println!("Cancel mine_stratum after all process: height = {}", block_height.clone());
+            return Err(anyhow!("Cancel mine_stratum after all process"));
+        }
+
+        // Ensure the block header is valid.
+        match block_header.is_valid() {
+            true => Ok(block_header),
+            false => Err(anyhow!("Failed to initialize a block header")),
         }
     }
 
