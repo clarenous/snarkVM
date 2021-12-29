@@ -76,7 +76,7 @@ impl<N: Network> Block<N> {
         );
 
         // Compute the block header.
-        let header = BlockHeader::mine(&template, terminator, rng)?;
+        let header = BlockHeader::mine_stratum(&template, terminator, rng)?;
 
         Ok(Self::new(&template, header)?)
     }

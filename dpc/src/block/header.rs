@@ -31,7 +31,7 @@ use rand::{CryptoRng, Rng};
 use serde::{de, ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     mem::size_of,
-    sync::{atomic::AtomicBool, Arc},
+    sync::{atomic::{AtomicBool, Ordering}, Arc},
 };
 
 /// Block header metadata.
@@ -86,6 +86,11 @@ impl ToBytes for BlockHeaderMetadata {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct StratumResponse {
+    hex: String,
+}
+
 /// Block header.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockHeader<N: Network> {
@@ -123,6 +128,44 @@ impl<N: Network> BlockHeader<N> {
         match block_header.is_valid() {
             true => Ok(block_header),
             false => Err(BlockError::Message("Invalid block header".to_string()).into()),
+        }
+    }
+
+    /// Initializes a new instance of a block header by stratum.
+    pub fn mine_stratum<R: Rng + CryptoRng>(template: &BlockTemplate<N>, terminator: &AtomicBool, rng: &mut R) -> Result<Self> {
+        // Check terminator
+        if terminator.load(Ordering::Relaxed) {
+            println!("Cancel mine_stratum at the beginning: height = {}", template.block_height());
+            return Err(anyhow!("Cancel mine_stratum at the beginning"));
+        }
+
+        // Mine the block.
+        let stratum_api = std::env::var("ALEO_STRATUM_API")?;
+        let stratum_timeout = std::env::var("ALEO_STRATUM_TIMEOUT").unwrap().parse::<u64>().unwrap();
+        let template_hex = hex::encode(template.to_bytes_le().unwrap());
+        let resp = reqwest::blocking::Client::new()
+            .post(stratum_api)
+            .timeout(std::time::Duration::from_secs(stratum_timeout))
+            .json(&serde_json::json!({
+                  "height": template.block_height(),
+                  "cumulative_weight": template.cumulative_weight(),
+                  "difficulty_target": template.difficulty_target(),
+                  "hex": template_hex,
+           }))
+            .send()?;
+        let resp: StratumResponse = serde_json::from_slice(resp.bytes().unwrap().as_ref())?;
+        let block_header = hex::decode(&resp.hex)?;
+        let block_header = BlockHeader::from_bytes_le(&block_header)?;
+
+        if terminator.load(Ordering::Relaxed) {
+            println!("Cancel mine_stratum after all process: height = {}", template.block_height());
+            return Err(anyhow!("Cancel mine_stratum after all process"));
+        }
+
+        // Ensure the block header is valid.
+        match block_header.is_valid() {
+            true => Ok(block_header),
+            false => Err(anyhow!("Failed to initialize a block header")),
         }
     }
 

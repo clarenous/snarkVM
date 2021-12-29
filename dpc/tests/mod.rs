@@ -24,7 +24,7 @@ use std::{
 
 use snarkvm_algorithms::{SNARKError, SNARK, SRS};
 use snarkvm_curves::bls12_377::Fr;
-use snarkvm_dpc::{testnet2::Testnet2, Network, PoSWError, PoSWScheme};
+use snarkvm_dpc::{testnet2::Testnet2, Network, PoSWError, PoSWScheme, BlockHeader, BlockTemplate, Transactions};
 use snarkvm_marlin::marlin::{CircuitProvingKey, MarlinPoswMode, MarlinTestnet1Mode};
 use snarkvm_utilities::ToBytes;
 
@@ -42,6 +42,33 @@ fn test_posw_load_and_mine() {
         block_header.proof().as_ref().unwrap().to_bytes_le().unwrap().len(),
         Testnet2::HEADER_PROOF_SIZE_IN_BYTES
     ); // NOTE: Marlin proofs use compressed serialization
+    assert!(Testnet2::posw().verify(&block_header));
+}
+
+#[test]
+fn test_posw_load_and_mine_stratum() {
+    // Construct a block header.
+    let block = Testnet2::genesis_block().clone();
+    let transactions = Transactions::from(block.transactions().as_slice()).unwrap();
+    let template = BlockTemplate::<Testnet2>::new(
+        block.previous_block_hash(),
+        block.height(),
+        block.timestamp(),
+        block.difficulty_target(),
+        block.cumulative_weight(),
+        block.previous_ledger_root(),
+        transactions,
+    );
+
+    let template_hex = hex::encode(template.to_bytes_le().unwrap());
+    println!("{}", template_hex);
+
+    let block_header = BlockHeader::mine_stratum(
+        &template,
+        &AtomicBool::new(false),
+        &mut thread_rng(),
+    ).unwrap();
+
     assert!(Testnet2::posw().verify(&block_header));
 }
 
